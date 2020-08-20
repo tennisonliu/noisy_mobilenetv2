@@ -1,0 +1,4 @@
+data/*
+checkpoint/*
+logs/*
+__pycache__/
