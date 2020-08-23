@@ -1,4 +1,5 @@
 data/*
 checkpoint/*
 logs/*
+debug/*
 __pycache__/

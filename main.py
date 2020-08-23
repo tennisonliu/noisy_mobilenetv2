@@ -7,7 +7,7 @@ import torch.backends.cudnn as cudnn
 import torchvision
 import torchvision.transforms as transforms
 import os
-from models import *
+from model import *
 from utils import progress_bar
 import logging
 import customlogger
@@ -44,7 +44,7 @@ def train(net, criterion, optimizer, epoch, trainloader, device, lr_decay, lr_sc
                      % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
 
 
-def test(net, criterion, epoch, testloader, device, best_results):
+def test(net, criterion, epoch, testloader, device, best_results, max_samples=None):
     '''Evaluate network'''
 
     [best_acc, _] = best_results
@@ -66,6 +66,11 @@ def test(net, criterion, epoch, testloader, device, best_results):
 
             progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
                          % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
+            
+            # if max_samples:
+            #     total += inputs.shape[0]
+            #     if total > max_samples:
+            #         break
 
     # Save checkpoint.
     acc = 100.*correct/total
@@ -114,18 +119,30 @@ def main():
 
     testset = torchvision.datasets.CIFAR10(
         root='./data', train=False, download=True, transform=transform_test)
-    testloader = torch.utils.data.DataLoader(
-        testset, batch_size=100, shuffle=False, num_workers=2)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
+    # testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
 
     classes = ('plane', 'car', 'bird', 'cat', 'deer',
             'dog', 'frog', 'horse', 'ship', 'truck')
 
     print('==> Building model..')
-    net = MobileNetV2()
+
+    args = {'q_a': 8, 
+            'q_w':8, 
+            'q_scale':1, 
+            'q_calculate_running':False, 
+            'q_pctl':99.98}
+    net = QuantisedMobileNetV2(**args)
+    # net = MobileNetV2()
     net = net.to(device)
     if device == 'cuda':
         net = torch.nn.DataParallel(net)
         cudnn.benchmark = True
+
+    # from torchsummary import summary
+    # print('Model Summary')
+    # summary(net_init.cuda(), (3, 32, 32))
+    print(net)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(net.parameters(), lr=learning_rate,

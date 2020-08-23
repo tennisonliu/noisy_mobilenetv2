@@ -11,7 +11,7 @@ class UniformQuantize(InplaceFunction):
     """modified from https://github.com/eladhoffer/quantized.pytorch/blob/master/models/modules/quantize.py"""
 
     @classmethod
-    def forward(cls, ctx, input, num_bits=8, min_value=None, max_value=None, inplace=False, debug=False):
+    def forward(cls, ctx, input, num_bits=8, min_value=None, max_value=None, inplace=False):
         ctx.inplace = inplace
         ctx.num_bits = num_bits
         ctx.min_value = min_value
@@ -109,7 +109,7 @@ class QuantMeasure(nn.Module):
                 elif self.running_max.item() > 0:
                     max_value = self.running_max.item()
                 else:
-                    print('\n\nSetting max_value to input.max\nrunning_max is ', self.running_max.item())
+                    # print('\n\nSetting max_value to input.max\nrunning_max is ', self.running_max.item())
                     max_value = input.max().item()
 
                 if False and max_value > 1:
@@ -120,4 +120,5 @@ class QuantMeasure(nn.Module):
             # else:
             #     stoch = 0
 
-        return UniformQuantize().apply(input, self.num_bits, min_value, max_value, stoch, self.inplace, False)
+        # return UniformQuantize().apply(input, self.num_bits, min_value, max_value, stoch, self.inplace, False)
+        return UniformQuantize().apply(input, self.num_bits, min_value, max_value, self.inplace)
