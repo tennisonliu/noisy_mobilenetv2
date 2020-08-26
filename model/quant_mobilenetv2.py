@@ -4,111 +4,13 @@ import torch.nn as nn
 import torch.nn.parallel
 import torch.optim
 import torch.utils.data
-from .quant_utils import QuantMeasure
-from .quant_layers import NoisyConv2d, NoisyLinear
-
-def _make_divisible(v, divisor, min_value=None):
-    '''
-    Ensure that all layers have a channel number that is divisible by 8
-    '''
-    if min_value is None:
-        min_value = divisor
-    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
-    # Make sure that round down does not go down by more than 10%.
-    if new_v < 0.9 * v:
-        new_v += divisor
-    return new_v
-
-# Conv + BatchNorm + ReLU block
-class ConvBNReLU(nn.Module):
-    def __init__(self, in_planes, out_planes, q_a=0, q_w=0, q_scale=1, q_calculate_running=False, q_pctl=99.98, kernel_size=3, stride=1, groups=1):
-        super(ConvBNReLU, self).__init__()
-        self.q_a = q_a
-        self.q_w = q_w
-        self.q_scale = q_scale
-        self.q_calculate_running = q_calculate_running
-        self.q_pctl = q_pctl
-        self.groups = groups
-        self.stride = stride
-        self.kernel_size = kernel_size
-        self.padding = (kernel_size - 1) // 2
-        # self.conv = nn.Conv2d(in_planes, out_planes, kernel_size, stride, self.padding, groups=groups, bias=False)
-        self.conv = NoisyConv2d(in_planes, out_planes, kernel_size=self.kernel_size, stride=self.stride, padding=self.padding, groups=self.groups, bias=False, num_bits=self.q_a, num_bits_weight=self.q_w, q_scale=self.q_scale, q_calculate_running=self.q_calculate_running, q_pctl=self.q_pctl)
-        self.bn = nn.BatchNorm2d(out_planes)
-        # self.relu = nn.ReLU6(inplace=True)
-        self.relu = nn.ReLU()
-        # self.kernel_size = kernel_size
-        # self.stride = stride
-        # self.groups = groups
-        # if self.q_a > 0:
-        #     self.quantise = QuantMeasure(self.q_a, scale=self.q_scale, calculate_running=self.q_calculate_running, pctl=self.q_pctl / 100)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.bn(x)
-        x = self.relu(x)
-        return x
-
-class InvertedResidual(nn.Module):
-    def __init__(self, inp, oup, stride, expand_ratio, q_a, q_w, q_scale, q_calculate_running, q_pctl):
-        '''
-        Create inverted residual module
-        inp: layer input
-        oup: layer output
-        stride: stride for Conv2d modules
-        expand ratio: expansion factor for layer in inverted residual block
-        '''
-        super(InvertedResidual, self).__init__()
-        self.stride = stride
-        self.expand_ratio = expand_ratio
-        self.q_a = q_a
-        self.q_w = q_w
-        self.q_scale = q_scale
-        self.q_calculate_running = q_calculate_running
-        self.q_pctl = q_pctl
-        # residual connection
-        self.use_res_connect = self.stride == 1 and inp == oup
-
-        assert self.stride in [1, 2]
-        self.hidden_dim = int(round(inp * self.expand_ratio))
-
-        self.conv1 = ConvBNReLU(inp, self.hidden_dim, self.q_a, self.q_w, self.q_scale, self.q_calculate_running, self.q_pctl, kernel_size=1)
-        self.conv2 = ConvBNReLU(self.hidden_dim, self.hidden_dim, self.q_a, self.q_w, self.q_scale, self.q_calculate_running, self.q_pctl, stride=self.stride, groups=self.hidden_dim)
-        # self.conv3 = nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False)
-        self.conv3 = NoisyConv2d(self.hidden_dim, oup,  kernel_size=1 , stride=1, padding=0, bias=False, num_bits=self.q_a, num_bits_weight=self.q_w)
-        self.bn = nn.BatchNorm2d(oup)
-
-        # TODO: remove global params
-        # if self.q_a > 0:
-            # self.quantize1 = QuantMeasure(args.q_a, stochastic=args.stochastic, scale=args.q_scale, calculate_running=args.calculate_running, pctl=args.pctl / 100, debug=args.debug_quant)
-            # self.quantize2 = QuantMeasure(args.q_a, stochastic=args.stochastic, scale=args.q_scale, calculate_running=args.calculate_running, pctl=args.pctl / 100, debug=args.debug_quant)
-            # self.quantise = QuantMeasure(self.q_a, scale=self.q_scale, calculate_running=self.calculate_running, pctl=self.pctl / 100)
-
-    def forward(self, x):
-        input = x
-        if self.expand_ratio != 1:
-            x = self.conv1(x)
-        x = self.conv2(x)
-        # TODO
-        # if self.q_a > 0:
-        #     x = self.quantise(x)
-        x = self.conv3(x)
-        x = self.bn(x)
-
-        if self.use_res_connect:
-            return x + input
-        else:
-            return x
-
-class View(nn.Module):
-    def __init__(self):
-        super(View, self).__init__()
-    
-    def forward(self, x, shape):
-        return x.view(shape, -1)
+from .quant_utils import _make_divisible
+from .quant_layers import NoisyConv2d, NoisyLinear, ConvBNReLU, InvertedResidual, View
 
 class QuantisedMobileNetV2(nn.Module):
-    def __init__(self, q_a=0, q_w=0, q_scale=1, q_calculate_running=False, q_pctl=99.98, dropout=0.0, num_classes=10, width_mult=1.0, inverted_residual_setting=None, round_nearest=8):
+    def __init__(self, q_a=0, q_w=0, dropout=0.0, num_classes=10, 
+                 width_mult=1.0, inverted_residual_setting=None, round_nearest=8,
+                 quant_three_sig=False, debug=False):
         '''
         Model declaration for quantise-able MobileNetV2
 
@@ -121,17 +23,15 @@ class QuantisedMobileNetV2(nn.Module):
         super(QuantisedMobileNetV2, self).__init__()
         self.q_a = q_a
         self.q_w = q_w
-        self.q_scale = q_scale
-        self.q_calculate_running = q_calculate_running
-        self.q_pctl = q_pctl
+        self.quant_three_sig = quant_three_sig
+        self.debug = debug
         self.dropout = dropout
         self.arrays = []
         
         print('Model Initialisation:')
         print(f'Quantising activations to {self.q_a} bits')
         print(f'Quantising weights to {self.q_w} bits')
-        print(f'Quantising {self.q_pctl} of activations and scaling upper value of activation quantisation by {self.q_scale}')
-        print(f'Calculate running: {self.q_calculate_running}')
+        print(f'Quantising to three-sigma range: {self.quant_three_sig}, debug enabled: {self.debug}')
 
         block = InvertedResidual
         input_channel = 32
@@ -153,21 +53,25 @@ class QuantisedMobileNetV2(nn.Module):
         
         input_channel = _make_divisible(input_channel * width_mult, round_nearest)
         self.last_channel = _make_divisible(last_channel * max(1.0, width_mult), round_nearest)
-        features = [ConvBNReLU(3, input_channel, q_a=self.q_a, q_w=self.q_w, q_scale=self.q_scale, q_calculate_running=self.q_calculate_running, q_pctl=self.q_pctl, stride=1)]
+        features = [ConvBNReLU(3, input_channel, q_a=self.q_a, q_w=self.q_w, 
+                                stride=1, quant_three_sig=self.quant_three_sig, debug=self.debug)]
 
         for t, c, n, s in inverted_residual_setting:
             output_channel = _make_divisible(c * width_mult, round_nearest)
             for i in range(n):
                 stride = s if i == 0 else 1
-                features.append(block(input_channel, output_channel, stride=stride, expand_ratio=t, q_a=self.q_a, q_w=self.q_w, q_scale=self.q_scale, q_calculate_running=self.q_calculate_running, q_pctl=self.q_pctl))
+                features.append(block(input_channel, output_channel, stride=stride, expand_ratio=t, 
+                                      q_a=self.q_a, q_w=self.q_w, quant_three_sig=self.quant_three_sig, debug=self.debug))
                 input_channel = output_channel
 
-        features.append(ConvBNReLU(input_channel, self.last_channel, q_a=self.q_a, q_w=self.q_w, q_scale=self.q_scale, q_calculate_running=self.q_calculate_running, q_pctl=self.q_pctl, kernel_size=1))
+        features.append(ConvBNReLU(input_channel, self.last_channel, q_a=self.q_a, q_w=self.q_w, 
+                                   kernel_size=1, quant_three_sig=self.quant_three_sig, debug=self.debug))
         self.features = nn.Sequential(*features)
         # self.drop1 = nn.Dropout(self.dropout)
         self.pool1 = nn.AvgPool2d(pooling_kernel)
         self.view1 = View()
-        self.fc1 = NoisyLinear(self.last_channel, num_classes, bias=True, num_bits=self.q_a, num_bits_weight=self.q_w, q_scale=self.q_scale, q_calculate_running=self.q_calculate_running, q_pctl=self.q_pctl)
+        self.fc1 = NoisyLinear(self.last_channel, num_classes, bias=True, num_bits=self.q_a, num_bits_weight=self.q_w, 
+                               quant_three_sig=self.quant_three_sig, debug=self.debug)
         # quantisation for dropout, if used
         # self.quantise = QuantMeasure(self.q_a, pctl=self.q_pctl, max_value=)
 
@@ -190,6 +94,7 @@ class QuantisedMobileNetV2(nn.Module):
                     nn.init.zeros_(m.bias) #TODO: the last FC layer should have bias
 
     def forward(self, x):
+        # print('HERE')
         # network architecture
         # x = self.features(x, epoch, i)
         x = self.features(x)

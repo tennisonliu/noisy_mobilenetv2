@@ -1,225 +1,151 @@
-'''Quantised MobileNetV2 Architecture'''
-from typing import Tuple
-from functools import partial
+'''Post Training Quantisation of MobileNetv2'''
+import torch
+import torchvision
+import torchvision.transforms as transforms
 import torch.nn as nn
 import torch.nn.functional as F
-import torch
+import torch.optim as optim
+import torch.backends.cudnn as cudnn
+import os
+from model import *
+from typing import Tuple
+from misc_utils import copy_model, test
 
-def quantised_weights(weights: torch.Tensor, num_bits) -> Tuple[torch.Tensor, float]:
+def quantised_weights(weights: torch.Tensor, num_bits=8, debug=False) -> Tuple[torch.Tensor, float]:
     '''
-    Post Training Quantiation (Symmetric Quantisation - Signed Integers)
-    Quantise weights so that all values are integers between [-2**n, 2**n-1]
-    Presently, only use total range to scale the input values by
+    quantise the weights so that all values are integers between -128 and 127.
+    You may want to use the total range, 3-sigma range, or some other range when
+    deciding just what factors to scale the float32 values by.
 
     Parameters:
-    weights: unquantised weights
+    weights (Tensor): The unquantised weights
 
     Returns:
-    (Tensor, float): (weights in quantised form, scaling factor)
+    (Tensor, float): A tuple with the following elements:
+                        * The weights in quantised form, where every value is an integer between -128 and 127.
+                          The "dtype" will still be "float", but the values themselves should all be integers.
+                        * The scaling factor that your weights were multiplied by.
+                          This value does not need to be an 8-bit integer.
     '''
+
     max_value = torch.max(weights)
     min_value = torch.min(weights)
-    qmin = float(-2**num_bits)
-    qmax = float(2**num_bits-1)
 
-    scale = (qmax - qmin)/(max_value - min_value)
-    scale = max(scale, 1e-6)
+    qmin = - 2. ** (num_bits - 1)
+    qmax = 2. ** (num_bits - 1) - 1.
+    scale = (max_value - min_value) / (qmax - qmin)
+    scale = max(scale, 1e-6)  # TODO figure out how to set this robustly! causes nans
 
-    # weights quantisation
-    weights = torch.clamp((weights * scale).round(), min=qmin, max=qmax)
+    quant_weights = weights
+    quant_weights.div_(scale)
+    quant_weights.clamp_(qmin, qmax).round_()
 
-    return weights, scale
+    if debug:
+        ax = plt.subplot(2, 1, 1)    
+        ax.hist(weights.cpu().view(-1))
+        ax = plt.subplot(2, 1, 2)
+        ax.hist(quant_weights.cpu().view(-1))
+        plt.show()
+        print(f'qmin: {qmin}, qmax: {qmax}, raw_min: {min_value.item()}, raw_max:{max_value.item()}')
 
-def quantise_layer_weights(model: nn.Module):
-    '''
-    Given a model, quantise layer weights
-    Presently only quantises Conv2d and Linear layers
-    '''
-    for layer in model.children():
-        print(layer)
+    return quant_weights, scale
+
+def quantise_layer_weights(model: nn.Module, num_bits=8, debug=False):
+    count = 0
+    for layer in model.modules():
         if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
-            q_layer_data, scale = quantised_weights(layer.weight.data)
+            print(layer)
+            count += 1
+            q_layer_data, scale = quantised_weights(layer.weight.data, debug)
             q_layer_data = q_layer_data.to(device)
 
             layer.weight.data = q_layer_data
             layer.weight.scale = scale
 
             if (q_layer_data < -128).any() or (q_layer_data > 127).any():
-                raise Exception("Quantized weights of {} layer include values out of bounds for an 8-bit signed integer".format(layer.__class__.__name__))
+                raise Exception("quantised weights of {} layer include values out of bounds for an 8-bit signed integer".format(layer.__class__.__name__))
             if (q_layer_data != q_layer_data.round()).any():
-                raise Exception("Quantized weights of {} layer include non-integer values".format(layer.__class__.__name__))
+                raise Exception("quantised weights of {} layer include non-integer values".format(layer.__class__.__name__))
 
+    print(f'Weights of {count} layers quantised')
+    assert count==54
 
-def register_activation_profiling_hooks(model: nn.Module):
-    '''
-    Add forward hooks for Conv2D adn Linear layers in network
+def main(saved_model_path, quant_bits):
+    # Initialise Model
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    Parameters:
-    model: network to profile
-    '''
-    model.profile_activations = True
-    def save_activation(previous_layer, layer, name, previous_layer_name, layer_no, mod, inp, out):
-      # print(f"Forward step through {name}, previous layer {previous_layer_name}")
-      if model.profile_activations:
-        if layer_no == 1:
-          '''first layer register input activations'''
-          model.input_activations = np.append(model.input_activations, inp[0].cpu().view(-1))
-          # print(f"{name}, First Layer")
-        elif layer_no == total_layer_no - 1:
-            '''final layer register penultimate and final layer activations'''
-          previous_layer.activations = np.append(previous_layer.activations, inp[0].cpu().view(-1))
-          layer.activations = np.append(layer.activations, out[0].cpu().view(-1))
-          # print(f"{name}, Last Layer")
-        else:
-          previous_layer.activations = np.append(previous_layer.activations, inp[0].cpu().view(-1))
+    print('==> Preparing data..')
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
+    testset = torchvision.datasets.CIFAR10(
+        root='./data', train=False, download=True, transform=transform_test)
+    testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
 
-    # initialise input and layer activations
-    model.input_activations = np.empty(0)
-    for name, layer in model.named_modules():
-      layer.activations = np.empty(0)
+    criterion = nn.CrossEntropyLoss()
 
-    total_layer_no = len(list(model.named_modules()))
-    previous_layer, previous_layer_name = None, None
-    # create forward hooks for conv2d and linear layers
-    for layer_no, (name, layer) in enumerate(model.named_modules()):
-      if name is not '' and (isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear)):
-        print(f"registering hooks for layer: {name}...")
-        layer.register_forward_hook(partial(save_activation, previous_layer, layer, name, previous_layer_name, layer_no))
-        previous_layer, previous_layer_name = layer , name
+    print('==> Building model..')
+    args = {'q_a': 0, 
+            'q_w': 0, 
+            'quant_three_sig': False,
+            'debug': False}
+    net = QuantisedMobileNetV2(**args)
+    net = net.to(device)
+    if device == 'cuda':
+        net = torch.nn.DataParallel(net)
+        cudnn.benchmark = True
+    # print(net)
 
-class QuantBlock(nn.Module):
-    def __init__(self, in_planes, out_planes, expansion, stride):
-        super(QuantBlock, self).__init__()
-        self.stride = stride
+    # Copy weights into net
+    if os.path.isfile(saved_model_path):
+        print("=> loading checkpoint '{}'".format(saved_model_path))
+        checkpoint = torch.load(saved_model_path)
+        net.load_state_dict(checkpoint['state_dict'])
+    else:
+        print("=> no checkpoint found at '{}'".format(saved_model_path))
 
-        planes = expansion * in_planes
+    # Evaluate on test set
+    print('Testing 32FP MobileNetV2')
+    best_acc, best_epoch = test(net, criterion, testloader, device, save_best=False)
+    print('[Raw MobileNetv2] - Best Accuracy: %.4f at epoch %d' % (best_acc, best_epoch))
 
-        # expansion
-        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=1, stride=1, padding=0, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-
-        # depthwise convolution
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=1, groups=planes, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-
-        # pointwise convolution
-        self.conv3 = nn.Conv2d(planes, out_planes, kernel_size=1, stride=1, padding=0, bias=False)
-        self.bn3 = nn.BatchNorm2d(out_planes)
-
-        # shortcut
-        self.shortcut = nn.Sequential()
-        if stride == 1 and in_planes != out_planes:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=1, padding=0, bias=False),
-                nn.BatchNorm2d(out_planes),
-            )
-
-    def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = F.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
-        out = out + self.shortcut(x) if self.stride==1 else out
-        return out
-
-
-'''Quantised MobileNetV2 Architecture'''
-class QuantisedMobileNetV2(nn.Module):
-    cfg = [(1,  16, 1, 1),
-           (6,  24, 2, 1),
-           (6,  32, 3, 2),
-           (6,  64, 4, 2),
-           (6,  96, 3, 1),
-           (6, 160, 3, 2),
-           (6, 320, 1, 1)]
-
-    def __init__(self, net_with_weights_quantised: nn.Module, num_bits: int):
-        super(QuantisedMobileNetv2, self).__init__()
-        
-        net_init = copy_model(net_with_weights_quantised)
-
-        for layer in net_init.children():
-            print(layer)
-            if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
-                def pre_hook(l, x):
-                    x = x[0]
-                    if (x < -128).any() or (x > 127).any():
-                        raise Exception("Input to {} layer is out of bounds for an 8-bit signed integer".format(l.__class__.__name__))
-                    if (x != x.round()).any():
-                        raise Exception("Input to {} layer has non-integer values".format(l.__class__.__name__))
-
-                layer.register_forward_pre_hook(pre_hook)
-        
-        self.num_bits = num_bits
-        self.input_activations = net_with_weights_quantised.input_activations
-        self.input_scale = QuantisedMobileNetV2.quantise_initial_input(self.input_activations, self.num_bits)
-
-        preceding_layer_scales = []
-        for layer in net_init.children():
-            if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
-                layer.output_scale = QuantisedMobileNetV2.quantise_activations(layer.activations, layer.weight.scale, self.input_scale, preceding_layer_scales, num_bits)
-                preceding_layer_scales.append((layer.weight.scale, layer.output_scale))
+    # Quantise layer weights and evaluate
+    print('Evaluating MobileNet with %d quantised weights' % quant_bits)
+    quant_net = copy_model(net)
+    quantise_layer_weights(quant_net, num_bits=quant_bits, debug=True)
+    best_acc, best_epoch = test(quant_net, testloader, device, save_best=False)
+    print('[Quantised Weights MobileNetv2] - Best Accuracy: %.4f at epoch %d' % (best_acc, best_epoch))
     
-    @staticmethod
-    def quantise_initial_input(pixels: np.ndarray, num_bits: int) -> float:
-        '''
-        Calculate scaling factor for input to first layer
+    # Quantise layer activations
+    print('Evalating MobileNetV2 with %d quantised weights and activations' % quant_bits)
+    # Create model
+    args = {'q_a': quant_bits, 
+            'q_w': 0, 
+            'quant_three_sig': False,
+            'debug': False}
+    quant_net_2 = QuantisedMobileNetV2(**args)
+    quant_net_2 = quant_net_2.to(device)
+    if device == 'cuda':
+        quant_net_2 = torch.nn.DataParallel(quant_net_2)
+        cudnn.benchmark = True
 
-        Parameters:
-        pixels: values of all pixels which were part of the input image during training
+    # Profile activations using raw model (i.e. raw weights) and training data
+    net_temp = copy_model(net)
+    register_activation_profiling_hooks(net_temp)
+    test(net_temp, trainloader, save_best=False, max_samples=500)
+    net_temp.profile_activations = False
+    # quantise activations
+    quantise_activations(net_temp, num_bits=quant_bits, debug=True)
 
-        Returns:
-        float: scaling factor for input
-        '''
-        max_value = np.max(pixels)
-        min_value = np.min(pixels)
-        qmin = float(-2**num_bits)
-        qmax = float(2**num_bits-1)
-        scale = (qmax - qmin)/(max_value - min_value)
-        scale = max(scale, 1e-6)
-        return scale
+    # Copy weights, weight scales across
+    quant_net_2 = copy_model(net, quant_net_2)
 
-    
-    def quantise_activations(activations: np.ndarray, n_w: float, n_initial_input: float, ns: List[Tuple[float, float]], num_bits: int) -> float:
-        '''
-        Calculate scaling factor to multiple output of a layer
+    # Instantiate model again, this time with quantisation parameters, copy weights across
 
-        Parameters:
-        activations: activation values output by layer during training
-        n_w: scale by which weights of layer were multiplied
-        n_initla_input: scale by which initial input to the neural network was multiplied
-        ns: list of tuples, each tuple represents weight scale, output scale of every preceding layer
+    print('[Quantised Weights + Activations MobileNetv2] - best Accuracy: %.4f at epoch %d' % (best_acc, best_epoch))
 
-        Returns:
-        float: scaling factor for the layer output
-        '''
-        quant_activations = activations * float(n_w) * n_initial_input
-        for preceding_layer_activations in ns:
-            quant_activations *= float(preceding_layer_activations[0])
-            quant_activations *= float(preceding_layer_activations[1])
-        max_value = np.max(quant_activations)
-        min_value = np.min(quant_activations)
-        qmin = float(-2**num_bits)
-        qmax = float(2**num_bits-1)
-        scale = (qmax - qmin)/(max_value - min_value)
-        scale = max(scale, 1e-6)
-        return scale
-    
-    def _make_layers(self, in_planes):
-        layers = []
-        for expansion, out_planes, num_blocks, stride in self.cfg:
-            strides = [stride] + [1]*(num_blocks-1)
-            for stride in strides:
-                layers.append(QuantBlock(in_planes, out_planes, expansion, stride))
-                in_planes = out_planes
-        return nn.Sequential(*layers)
-
-
-    def quant_forward(x):
-        out = F.relu(net_init.bn1(net_init.conv1(x)))
-        out = net_init.layers(out)
-        out = F.relu(net_init.bn2(net_init.conv2(out)))
-        out = F.avg_pool2d(out, 4)
-        out = out.view(out.size(0), -1)
-        out = net_init.linear(out)
-        return out
-
+if __name__ == "__main__":
+    saved_model_path = './checkpoint/ckpt.pth'
+    quant_bits = 8
+    main(saved_model_path, quant_bits)

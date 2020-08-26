@@ -8,86 +8,12 @@ import torchvision
 import torchvision.transforms as transforms
 import os
 from model import *
-from utils import progress_bar
+from misc_utils import progress_bar, train, test
 import logging
 import customlogger
 
 # Presently not used
 # logger = customlogger.setup_custom_logger('root')
-
-def train(net, criterion, optimizer, epoch, trainloader, device, lr_decay, lr_schedule=[]):
-    '''Train network for one epoch'''
-
-    if epoch in lr_schedule:
-        for param_group in optimizer.param_groups:
-            param_group["lr"] *= lr_decay
-        print('Updating LR')
-    print('\nEpoch: %d and LR: %.4f' % (epoch, optimizer.param_groups[0]["lr"]))
-    net.train()
-    train_loss = 0
-    correct = 0
-    total = 0
-    for batch_idx, (inputs, targets) in enumerate(trainloader):
-        inputs, targets = inputs.to(device), targets.to(device)
-        optimizer.zero_grad()
-        outputs = net(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()
-        optimizer.step()
-
-        train_loss += loss.item()
-        _, predicted = outputs.max(1)
-        total += targets.size(0)
-        correct += predicted.eq(targets).sum().item()
-
-        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                     % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
-
-
-def test(net, criterion, epoch, testloader, device, best_results, max_samples=None):
-    '''Evaluate network'''
-
-    [best_acc, _] = best_results
-    print('\nEvaluating...')
-    net.eval()
-    test_loss = 0
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(testloader):
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = net(inputs)
-            loss = criterion(outputs, targets)
-
-            test_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-
-            progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                         % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
-            
-            # if max_samples:
-            #     total += inputs.shape[0]
-            #     if total > max_samples:
-            #         break
-
-    # Save checkpoint.
-    acc = 100.*correct/total
-    if acc > best_acc:
-        print('Saving..')
-        state = {
-            'net': net.state_dict(),
-            'acc': acc,
-            'epoch': epoch,
-        }
-        if not os.path.isdir('checkpoint'):
-            os.mkdir('checkpoint')
-        torch.save(state, './checkpoint/ckpt.pth')
-        best_acc = acc
-        best_epoch = epoch
-        return best_acc, best_epoch
-
 
 def main():
     # Define training hyperparameters
@@ -127,11 +53,11 @@ def main():
 
     print('==> Building model..')
 
-    args = {'q_a': 8, 
-            'q_w':8, 
-            'q_scale':1, 
-            'q_calculate_running':False, 
-            'q_pctl':99.98}
+    args = {'q_a': 0, 
+            'q_w': 0, 
+            'quant_three_sig': False,
+            'debug': False}
+
     net = QuantisedMobileNetV2(**args)
     # net = MobileNetV2()
     net = net.to(device)
@@ -151,8 +77,8 @@ def main():
     print('==> Training model..')
     for epoch in range(epochs):
         train(net, criterion, optimizer, epoch, trainloader, device, lr_decay, lr_schedule)
-        if (res := test(net, criterion, epoch, testloader, device, [best_acc, best_epoch])) is not None: [best_acc, best_epoch] = res
-        
+        if (res := test(net, criterion, testloader, device, save_best=True, epoch=epoch, best_results=[best_acc, best_epoch], save_model_path='best_net.pth')) is not None: [best_acc, best_epoch] = res
+
     print('==> Training complete..')
     print('Best Accuracy: %.4f at epoch %d' % (best_acc, best_epoch))
 
