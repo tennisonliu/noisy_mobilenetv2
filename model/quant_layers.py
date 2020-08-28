@@ -113,10 +113,11 @@ class NoisyLinear(nn.Linear):
 # Conv + BatchNorm + ReLU block
 class ConvBNReLU(nn.Module):
     def __init__(self, in_planes, out_planes, q_a=0, q_w=0, kernel_size=3, stride=1, groups=1, 
-                 quant_three_sig=False, debug=False):
+                track_running_stats=False, quant_three_sig=False, debug=False):
         super(ConvBNReLU, self).__init__()
         self.q_a = q_a
         self.q_w = q_w
+        self.track_running_stats = track_running_stats
         self.quant_three_sig = quant_three_sig
         self.debug = debug
         self.groups = groups
@@ -127,7 +128,7 @@ class ConvBNReLU(nn.Module):
         self.conv = NoisyConv2d(in_planes, out_planes, kernel_size=self.kernel_size, stride=self.stride, padding=self.padding, 
                                 groups=self.groups, bias=False, num_bits=self.q_a, num_bits_weight=self.q_w, 
                                 quant_three_sig=self.quant_three_sig, debug=self.debug)
-        self.bn = nn.BatchNorm2d(out_planes)
+        self.bn = nn.BatchNorm2d(out_planes, track_running_stats=self.track_running_stats)
         # self.relu = nn.ReLU6(inplace=True)
         self.relu = nn.ReLU()
         # self.kernel_size = kernel_size
@@ -143,7 +144,8 @@ class ConvBNReLU(nn.Module):
         return x
 
 class InvertedResidual(nn.Module):
-    def __init__(self, inp, oup, stride, expand_ratio, q_a, q_w, quant_three_sig=False, debug=False):
+    def __init__(self, inp, oup, stride, expand_ratio, q_a=0, q_w=0, track_running_stats=False,
+                quant_three_sig=False, debug=False):
         '''
         Create inverted residual module
         inp: layer input
@@ -156,6 +158,7 @@ class InvertedResidual(nn.Module):
         self.expand_ratio = expand_ratio
         self.q_a = q_a
         self.q_w = q_w
+        self.track_running_stats = track_running_stats
         self.quant_three_sig = quant_three_sig
         self.debug = debug
         # residual connection
@@ -173,7 +176,7 @@ class InvertedResidual(nn.Module):
         self.conv3 = NoisyConv2d(self.hidden_dim, oup,  kernel_size=1 , stride=1, padding=0, bias=False, 
                                  num_bits=self.q_a, num_bits_weight=self.q_w,
                                  quant_three_sig=self.quant_three_sig, debug=self.debug)
-        self.bn = nn.BatchNorm2d(oup)
+        self.bn = nn.BatchNorm2d(oup, track_running_stats=self.track_running_stats)
 
         # TODO: remove global params
         # if self.q_a > 0:

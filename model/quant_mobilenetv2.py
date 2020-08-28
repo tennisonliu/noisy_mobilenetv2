@@ -10,7 +10,7 @@ from .quant_layers import NoisyConv2d, NoisyLinear, ConvBNReLU, InvertedResidual
 class QuantisedMobileNetV2(nn.Module):
     def __init__(self, q_a=0, q_w=0, dropout=0.0, num_classes=10, 
                  width_mult=1.0, inverted_residual_setting=None, round_nearest=8,
-                 quant_three_sig=False, debug=False):
+                 track_running_stats=False, quant_three_sig=False, debug=False):
         '''
         Model declaration for quantise-able MobileNetV2
 
@@ -24,6 +24,7 @@ class QuantisedMobileNetV2(nn.Module):
         self.q_a = q_a
         self.q_w = q_w
         self.quant_three_sig = quant_three_sig
+        self.track_running_stats = track_running_stats
         self.debug = debug
         self.dropout = dropout
         self.arrays = []
@@ -54,18 +55,18 @@ class QuantisedMobileNetV2(nn.Module):
         input_channel = _make_divisible(input_channel * width_mult, round_nearest)
         self.last_channel = _make_divisible(last_channel * max(1.0, width_mult), round_nearest)
         features = [ConvBNReLU(3, input_channel, q_a=self.q_a, q_w=self.q_w, 
-                                stride=1, quant_three_sig=self.quant_three_sig, debug=self.debug)]
+                                stride=1, track_running_stats=self.track_running_stats, quant_three_sig=self.quant_three_sig, debug=self.debug)]
 
         for t, c, n, s in inverted_residual_setting:
             output_channel = _make_divisible(c * width_mult, round_nearest)
             for i in range(n):
                 stride = s if i == 0 else 1
                 features.append(block(input_channel, output_channel, stride=stride, expand_ratio=t, 
-                                      q_a=self.q_a, q_w=self.q_w, quant_three_sig=self.quant_three_sig, debug=self.debug))
+                                      q_a=self.q_a, q_w=self.q_w, track_running_stats=self.track_running_stats,quant_three_sig=self.quant_three_sig, debug=self.debug))
                 input_channel = output_channel
 
         features.append(ConvBNReLU(input_channel, self.last_channel, q_a=self.q_a, q_w=self.q_w, 
-                                   kernel_size=1, quant_three_sig=self.quant_three_sig, debug=self.debug))
+                                   kernel_size=1, track_running_stats=self.track_running_stats,quant_three_sig=self.quant_three_sig, debug=self.debug))
         self.features = nn.Sequential(*features)
         # self.drop1 = nn.Dropout(self.dropout)
         self.pool1 = nn.AvgPool2d(pooling_kernel)

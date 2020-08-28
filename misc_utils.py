@@ -67,9 +67,11 @@ def init_params(net):
             if m.bias:
                 init.constant(m.bias, 0)
 
-
-_, term_width = os.popen('stty size', 'r').read().split()
-term_width = int(term_width)
+try:
+    _, term_width = os.popen('stty size', 'r').read().split()
+    term_width = int(term_width)
+except:
+    term_width=96
 
 TOTAL_BAR_LENGTH = 65.
 last_time = time.time()
@@ -178,7 +180,8 @@ def train(net, criterion, optimizer, epoch, trainloader, device, lr_decay, lr_sc
                      % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
 
 
-def test(net, criterion, testloader, device, save_best=False, epoch=None, best_results=None, save_model_path='ckpt.pth', max_samples=None):
+def test(net, criterion, testloader, device, save_best=False, epoch=None, 
+        best_results=None, save_model_path='ckpt.pth', max_samples=None):
     '''Evaluate network'''
 
     print('\nEvaluating...')
@@ -206,7 +209,10 @@ def test(net, criterion, testloader, device, save_best=False, epoch=None, best_r
 
     # Save checkpoint.
 
-    [best_acc, best_epoch] = best_results
+    if best_results is not None:
+        [best_acc, best_epoch] = best_results
+    else:
+        best_acc, best_epoch = 0, 0
     acc = 100.*correct/total
     if acc > best_acc:
         if save_best: 

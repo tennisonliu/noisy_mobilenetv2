@@ -10,6 +10,7 @@ import os
 from model import *
 from typing import Tuple
 from misc_utils import copy_model, test
+import matplotlib.pyplot as plt
 
 def quantised_weights(weights: torch.Tensor, num_bits=8, debug=False) -> Tuple[torch.Tensor, float]:
     '''
@@ -33,11 +34,15 @@ def quantised_weights(weights: torch.Tensor, num_bits=8, debug=False) -> Tuple[t
 
     qmin = - 2. ** (num_bits - 1)
     qmax = 2. ** (num_bits - 1) - 1.
-    scale = (max_value - min_value) / (qmax - qmin)
-    scale = max(scale, 1e-6)  # TODO figure out how to set this robustly! causes nans
+    # scale = (max_value - min_value) / (qmax - qmin)
+    # scale = max(scale, 1e-6)  # TODO figure out how to set this robustly! causes nans
+    scale = (qmax - qmin)/(max_value - min_value)
+    scale = max(scale, 1e-6)
 
-    quant_weights = weights
-    quant_weights.div_(scale)
+    # quant_weights = weights
+    # quant_weights.div_(scale)
+    # quant_weights.clamp_(qmin, qmax).round_()
+    quant_weights = (weights*scale)
     quant_weights.clamp_(qmin, qmax).round_()
 
     if debug:
@@ -46,23 +51,23 @@ def quantised_weights(weights: torch.Tensor, num_bits=8, debug=False) -> Tuple[t
         ax = plt.subplot(2, 1, 2)
         ax.hist(quant_weights.cpu().view(-1))
         plt.show()
-        print(f'qmin: {qmin}, qmax: {qmax}, raw_min: {min_value.item()}, raw_max:{max_value.item()}')
+        print(f'qmin: {qmin}, qmax: {qmax}, scale_factor: {scale}, raw_min: {min_value.item()}, raw_max:{max_value.item()}')
 
     return quant_weights, scale
 
-def quantise_layer_weights(model: nn.Module, num_bits=8, debug=False):
+def quantise_layer_weights(model: nn.Module, device, num_bits=8, debug=False):
     count = 0
     for layer in model.modules():
         if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
             print(layer)
             count += 1
-            q_layer_data, scale = quantised_weights(layer.weight.data, debug)
+            q_layer_data, scale = quantised_weights(layer.weight.data, num_bits, debug)
             q_layer_data = q_layer_data.to(device)
 
             layer.weight.data = q_layer_data
             layer.weight.scale = scale
 
-            if (q_layer_data < -128).any() or (q_layer_data > 127).any():
+            if (q_layer_data < -(2.**(num_bits-1))).any() or (q_layer_data > 2.**(num_bits-1)-1).any():
                 raise Exception("quantised weights of {} layer include values out of bounds for an 8-bit signed integer".format(layer.__class__.__name__))
             if (q_layer_data != q_layer_data.round()).any():
                 raise Exception("quantised weights of {} layer include non-integer values".format(layer.__class__.__name__))
@@ -89,34 +94,36 @@ def main(saved_model_path, quant_bits):
     args = {'q_a': 0, 
             'q_w': 0, 
             'quant_three_sig': False,
+            'track_running_stas': False,
             'debug': False}
     net = QuantisedMobileNetV2(**args)
     net = net.to(device)
     if device == 'cuda':
         net = torch.nn.DataParallel(net)
         cudnn.benchmark = True
-    # print(net)
+    print(net)
 
     # Copy weights into net
     if os.path.isfile(saved_model_path):
         print("=> loading checkpoint '{}'".format(saved_model_path))
         checkpoint = torch.load(saved_model_path)
-        net.load_state_dict(checkpoint['state_dict'])
+        net.load_state_dict(checkpoint['net'])
     else:
         print("=> no checkpoint found at '{}'".format(saved_model_path))
 
     # Evaluate on test set
-    print('Testing 32FP MobileNetV2')
+    print('Evaluating 32FP MobileNetV2')
     best_acc, best_epoch = test(net, criterion, testloader, device, save_best=False)
-    print('[Raw MobileNetv2] - Best Accuracy: %.4f at epoch %d' % (best_acc, best_epoch))
+    print('[Raw MobileNetv2] - Best Accuracy: {} at epoch {}'.format(best_acc, best_epoch))
 
     # Quantise layer weights and evaluate
-    print('Evaluating MobileNet with %d quantised weights' % quant_bits)
+    print('Evaluating MobileNet with {} bits quantised weights'.format(quant_bits))
     quant_net = copy_model(net)
-    quantise_layer_weights(quant_net, num_bits=quant_bits, debug=True)
-    best_acc, best_epoch = test(quant_net, testloader, device, save_best=False)
-    print('[Quantised Weights MobileNetv2] - Best Accuracy: %.4f at epoch %d' % (best_acc, best_epoch))
+    quantise_layer_weights(quant_net, device=device, num_bits=quant_bits, debug=True)
+    best_acc, best_epoch = test(quant_net, criterion, testloader, device, save_best=False)
+    print('[Quantised Weights MobileNetv2] - Best Accuracy: {} at epoch {}'.format(best_acc, best_epoch))
     
+    '''
     # Quantise layer activations
     print('Evalating MobileNetV2 with %d quantised weights and activations' % quant_bits)
     # Create model
@@ -144,8 +151,9 @@ def main(saved_model_path, quant_bits):
     # Instantiate model again, this time with quantisation parameters, copy weights across
 
     print('[Quantised Weights + Activations MobileNetv2] - best Accuracy: %.4f at epoch %d' % (best_acc, best_epoch))
+    '''
 
 if __name__ == "__main__":
-    saved_model_path = './checkpoint/ckpt.pth'
+    saved_model_path = './checkpoint/best_net.pth'
     quant_bits = 8
     main(saved_model_path, quant_bits)
