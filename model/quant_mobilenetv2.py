@@ -32,6 +32,7 @@ class QuantisedMobileNetV2(nn.Module):
         print('Model Initialisation:')
         print(f'Quantising activations to {self.q_a} bits')
         print(f'Quantising weights to {self.q_w} bits')
+        print(f'Track running stats for BatchNorm: {self.track_running_stats}')
         print(f'Quantising to three-sigma range: {self.quant_three_sig}, debug enabled: {self.debug}')
 
         block = InvertedResidual
@@ -71,8 +72,7 @@ class QuantisedMobileNetV2(nn.Module):
         # self.drop1 = nn.Dropout(self.dropout)
         self.pool1 = nn.AvgPool2d(pooling_kernel)
         self.view1 = View()
-        self.fc1 = NoisyLinear(self.last_channel, num_classes, bias=True, num_bits=self.q_a, num_bits_weight=self.q_w, 
-                               quant_three_sig=self.quant_three_sig, debug=self.debug)
+        self.fc1 = NoisyLinear(self.last_channel, num_classes, bias=True, num_bits=self.q_a, num_bits_weight=self.q_w, quant_three_sig=self.quant_three_sig, debug=self.debug)
         # quantisation for dropout, if used
         # self.quantise = QuantMeasure(self.q_a, pctl=self.q_pctl, max_value=)
 

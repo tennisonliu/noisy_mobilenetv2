@@ -17,6 +17,8 @@ import logging
 from datetime import datetime
 from copy import deepcopy
 import torch
+import torchvision
+import torchvision.transforms as transforms
 
 # A convenience function which we use to copy networks
 def copy_model(model: nn.Module) -> nn.Module:
@@ -151,6 +153,29 @@ def format_time(seconds):
         f = '0ms'
     return f
 
+def prepare_data(dataset='CIFAR10', train_batchsize=128, test_batchsize=200):
+    print('==> Preparing data..')
+    if dataset == 'CIFAR10':
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+
+        trainset = torchvision.datasets.CIFAR10(
+            root='./data', train=True, download=True, transform=transform_train)
+        trainloader = torch.utils.data.DataLoader(
+            trainset, batch_size=train_batchsize, shuffle=True, num_workers=2)
+        testset = torchvision.datasets.CIFAR10(
+            root='./data', train=False, download=True, transform=transform_test)
+        testloader = torch.utils.data.DataLoader(testset, batch_size=test_batchsize, shuffle=False, num_workers=2)
+        return trainloader, testloader
+
 def train(net, criterion, optimizer, epoch, trainloader, device, lr_decay, lr_schedule=[]):
     '''Train network for one epoch'''
 
@@ -181,7 +206,7 @@ def train(net, criterion, optimizer, epoch, trainloader, device, lr_decay, lr_sc
 
 
 def test(net, criterion, testloader, device, save_best=False, epoch=None, 
-        best_results=None, save_model_path='ckpt.pth', max_samples=None):
+        best_results=None, save_model_path='ckpt.pth', max_batches=None):
     '''Evaluate network'''
 
     print('\nEvaluating...')
@@ -202,9 +227,8 @@ def test(net, criterion, testloader, device, save_best=False, epoch=None,
 
             progress_bar(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
                          % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
-
-            if max_samples:
-                if total > max_samples:
+            if max_batches:
+                if batch_idx+1 >= max_batches:
                     break
 
     # Save checkpoint.
