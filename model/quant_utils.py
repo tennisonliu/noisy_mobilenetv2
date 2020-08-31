@@ -1,4 +1,5 @@
 import torch
+import math
 from torch import nn
 from torch.autograd.function import InplaceFunction, Function
 import random
@@ -103,11 +104,6 @@ def _register_activation_profiling_hooks(model: nn.Module):
           layer.input_activations = np.append(layer.input_activations, inp[0].cpu().view(-1))
           # print(f"{layer}, Layer in the Middle :)")
 
-    # initialise input and layer activations
-    # model.input_activations = np.empty(0)
-    # for name, layer in model.named_modules():
-    #   layer.activations = np.empty(0)
-
     total_layer_no = len([(name, layer) for name, layer in model.named_modules() if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear)])
     print(f'Total number of layers with quantisable activations {total_layer_no}')
     # create forward hooks for conv2d and linear layers
@@ -127,7 +123,7 @@ def _register_activation_profiling_hooks(model: nn.Module):
     print(f'Registered activation hooks for {layer_count} layers')
     assert layer_count==54
 
-def _get_layer_quant_factor(activations: np.ndarray, num_bits: int, ns: List[Tuple[float, float]], debug=False) -> float:
+def _get_layer_quant_factor(activations: np.ndarray, num_bits: int, ns: List[Tuple[float, float]], pctl_range: float, debug=False) -> float:
     '''
     Calculate a scaling factor to multiply the input of a layer by.
 
@@ -143,18 +139,16 @@ def _get_layer_quant_factor(activations: np.ndarray, num_bits: int, ns: List[Tup
     '''
 
     quant_activations = activations
-    '''
-    quant_activations = activations * float(n_w) * n_initial_input
-    for preceding_layer_activations in ns:
-        print(preceding_layer_activations)
-        # quant_activations *= float(preceding_layer_activations[0]) 
-        quant_activations *= float(preceding_layer_activations[1])
-    '''
-    max_value = np.max(quant_activations)
-    min_value = np.min(quant_activations)
+    sorted_activations = np.sort(quant_activations)
+    print(f'size: {len(quant_activations)} original max: {np.max(quant_activations)}, original min: {np.min(quant_activations)}')
+    # get max and min activations values given percentile
+    max_value = sorted_activations[math.floor((pctl_range+0.5*(100.0-pctl_range))/100.0*len(quant_activations))-1]
+    min_value = sorted_activations[math.floor((0.5*(100.0-pctl_range))/100.0*len(quant_activations))]
+
     qmin = -2. ** (num_bits - 1)
     qmax = 2. ** (num_bits -1) - 1
     scale = (qmax - qmin)/(max_value - min_value)
+    print(f'raw_max: {max_value}, raw_min: {min_value}, q_max: {qmax}, q_min: {qmin}, scale_factor: {scale}')
     if debug:
       ax = plt.subplot(2, 1, 1)
       ax.hist(quant_activations)
@@ -163,27 +157,30 @@ def _get_layer_quant_factor(activations: np.ndarray, num_bits: int, ns: List[Tup
       plt.show()
     return scale
 
-def _calc_quant_scale(model: nn.Module, num_bits, debug=False):
-
-    preceding_layer_scales = []
-    layer_no = 0
-    for layer in model.modules():
-      if isinstance(layer, nn.Conv2d):
-        layer_no += 1
-        print(f'Layer: {layer_no}, {layer}')
-        if not np.any(layer.input_activations):
-          print(f'No input activations registered for layer {layer_no}')
-          pass
-        else:
-          # layer.input_scale = get_layer_quant_factor(layer.input_activations, num_bits, layer.weight.scale, model.input_scale, preceding_layer_scales, debug=debug)
-          layer.input_scale = _get_layer_quant_factor(layer.input_activations, num_bits, preceding_layer_scales, debug=debug)
-          print(f'Scaling factor for layer input: {layer.input_scale}')
-          preceding_layer_scales.append((layer.weight.scale, layer.input_scale))
-      if isinstance(layer, nn.Linear):
-        layer_no += 1
-        print(f'Layer: {layer_no}, {layer}')
-        layer.input_scale = _get_layer_quant_factor(layer.input_activations, num_bits, preceding_layer_scales, debug=debug)
-        preceding_layer_scales.append((layer.weight.scale, layer.input_scale))
+def _calc_quant_scale(model: nn.Module, num_bits, pctl_range=100., debug=False):
+  '''
+  pctl_range indicates the percentage of the distribution to use when calculating scaling factor
+  e.g. if we use 3-sigma range, this would be 99.7%?
+  '''
+  print(f'\n==> Calculating scaling factor with {pctl_range}% of activations')
+  preceding_layer_scales = []
+  layer_no = 0
+  for layer in model.modules():
+    if isinstance(layer, nn.Conv2d):
+      layer_no += 1
+      print(f'Layer: {layer_no}, {layer}')
+      if not np.any(layer.input_activations):
+        print(f'No input activations registered for layer {layer_no}')
+        pass
+      else:
+        layer.input_scale = _get_layer_quant_factor(layer.input_activations, num_bits, preceding_layer_scales, pctl_range, debug=debug)
         print(f'Scaling factor for layer input: {layer.input_scale}')
-        layer.output_scale = _get_layer_quant_factor(layer.output_activations, num_bits, preceding_layer_scales, debug=debug)
-        print(f'Scaling factor for layer output: {layer.output_scale}')
+        preceding_layer_scales.append((layer.weight.scale, layer.input_scale))
+    if isinstance(layer, nn.Linear):
+      layer_no += 1
+      print(f'Layer: {layer_no}, {layer}')
+      layer.input_scale = _get_layer_quant_factor(layer.input_activations, num_bits, preceding_layer_scales, pctl_range, debug=debug)
+      preceding_layer_scales.append((layer.weight.scale, layer.input_scale))
+      print(f'Scaling factor for layer input: {layer.input_scale}')
+      # layer.output_scale = _get_layer_quant_factor(layer.output_activations, num_bits, preceding_layer_scales, pctl_range, debug=debug)
+      # print(f'Scaling factor for layer output: {layer.output_scale}')

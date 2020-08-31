@@ -12,7 +12,7 @@ from misc_utils import copy_model, train, test, prepare_data
 import matplotlib.pyplot as plt
 from copy import deepcopy
 
-def main(saved_model_path, quant_bits):
+def main(saved_model_path, quant_bits, pctl_range):
     # Initialise Model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -58,25 +58,15 @@ def main(saved_model_path, quant_bits):
     # Profile output activations witht train data
     print('\n==> Profiling activations..')
     _register_activation_profiling_hooks(quant_net)
-    test(quant_net, criterion, trainloader, device, save_best=False, max_batches=1)
+    print('\n==> Profiling activations using train data')
+    test(quant_net, criterion, trainloader, device, save_best=False, max_batches=2)
     quant_net.profile_activations = False
     # Calculate quantisation scale factor based on activation profiles
-
-    # net_init = copy_model(quant_net)
-    # # get activation_profiles from un-quantised weights
-    # for layer_init, layer_qn2 in zip(net_init.modules(), quant_net.modules()):
-    #     if isinstance(layer_init, nn.Conv2d):
-    #         layer_init.input_activations = deepcopy(layer_qn2.input_activations)
-    #     if isinstance(layer_init, nn.Linear):
-    #         layer_init.input_activations = deepcopy(layer_qn2.input_activations)
-    #         layer_init.output_activations = deepcopy(layer_qn2.output_activations)
-
-    _calc_quant_scale(quant_net, num_bits=quant_bits, debug=False)
+    _calc_quant_scale(quant_net, num_bits=quant_bits, pctl_range=pctl_range, debug=False)
 
     # Create net with quantisation during forward steps. 
     # Note: no q_w since quantised weights have already been copied over
-
-    args = {'q_a': 8, 
+    args = {'q_a': quant_bits, 
             'q_w': 0, 
             'quant_three_sig': False,
             'track_running_stats': False,
@@ -101,7 +91,7 @@ def main(saved_model_path, quant_bits):
         if isinstance(layer_init2, nn.Linear):
             layer_count += 1
             layer_init2.input_scale = deepcopy(layer_init.input_scale)
-            layer_init2.output_scale = deepcopy(layer_init.output_scale)
+            # layer_init2.output_scale = deepcopy(layer_init.output_scale)
     assert layer_count==54
     
     best_acc, best_epoch = test(quant_net_2, criterion, testloader, device, save_best=False)
@@ -110,4 +100,5 @@ def main(saved_model_path, quant_bits):
 if __name__ == "__main__":
     saved_model_path = './checkpoint/best_net.pth'
     quant_bits = 4
-    main(saved_model_path, quant_bits)
+    pctl_range = 99.7 # three sigma range
+    main(saved_model_path, quant_bits, pctl_range)
