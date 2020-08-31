@@ -166,8 +166,10 @@ def _get_layer_quant_factor(activations: np.ndarray, num_bits: int, ns: List[Tup
 def _calc_quant_scale(model: nn.Module, num_bits, debug=False):
 
     preceding_layer_scales = []
-    for layer_no, layer in enumerate(model.modules()):
+    layer_no = 0
+    for layer in model.modules():
       if isinstance(layer, nn.Conv2d):
+        layer_no += 1
         print(f'Layer: {layer_no}, {layer}')
         if not np.any(layer.input_activations):
           print(f'No input activations registered for layer {layer_no}')
@@ -178,6 +180,7 @@ def _calc_quant_scale(model: nn.Module, num_bits, debug=False):
           print(f'Scaling factor for layer input: {layer.input_scale}')
           preceding_layer_scales.append((layer.weight.scale, layer.input_scale))
       if isinstance(layer, nn.Linear):
+        layer_no += 1
         print(f'Layer: {layer_no}, {layer}')
         layer.input_scale = _get_layer_quant_factor(layer.input_activations, num_bits, preceding_layer_scales, debug=debug)
         preceding_layer_scales.append((layer.weight.scale, layer.input_scale))

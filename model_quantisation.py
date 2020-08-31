@@ -75,7 +75,8 @@ def main(saved_model_path, quant_bits):
 
     # Create net with quantisation during forward steps. 
     # Note: no q_w since quantised weights have already been copied over
-    args = {'q_a': quant_bits, 
+
+    args = {'q_a': 8, 
             'q_w': 0, 
             'quant_three_sig': False,
             'track_running_stats': False,
@@ -86,18 +87,20 @@ def main(saved_model_path, quant_bits):
         quant_net_2 = torch.nn.DataParallel(quant_net_2)
         cudnn.benchmark = True
     print('\n==> Creating network with quantisation function')
-    # Copy quantised weights and scale factor for activations from quant_net
+
+    # Copy quantised weights from quant_net
+    quant_net_2.load_state_dict(quant_net.state_dict())
+
+    # Copy activation scale factor from quant_net
     layer_count = 0
     for layer_init2, layer_init in zip(quant_net_2.modules(), quant_net.modules()):
         if isinstance(layer_init2, nn.Conv2d):
             layer_count += 1
             if layer_count != 2:
                 layer_init2.input_scale = deepcopy(layer_init.input_scale)
-                layer_init2.weight.data = deepcopy(layer_init.weight.data)
         if isinstance(layer_init2, nn.Linear):
             layer_count += 1
             layer_init2.input_scale = deepcopy(layer_init.input_scale)
-            layer_init2.weight.data = deepcopy(layer_init.weight.data)
             layer_init2.output_scale = deepcopy(layer_init.output_scale)
     assert layer_count==54
     
@@ -106,5 +109,5 @@ def main(saved_model_path, quant_bits):
     
 if __name__ == "__main__":
     saved_model_path = './checkpoint/best_net.pth'
-    quant_bits = 8
+    quant_bits = 4
     main(saved_model_path, quant_bits)
