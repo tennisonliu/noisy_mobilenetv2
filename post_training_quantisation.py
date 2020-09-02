@@ -98,7 +98,7 @@ def main(saved_model_path, quant_bits, pctl_range):
     print('\n[Quantised Weights + Activations MobileNetv2] - Best Accuracy: {} at epoch {}'.format(best_acc, best_epoch))
     
 if __name__ == "__main__":
-    saved_model_path = './checkpoint/best_net.pth'
+    saved_model_path = './checkpoint/vanilla_net.pth'
     quant_bits = 4
     pctl_range = 99.7 # three sigma range
     main(saved_model_path, quant_bits, pctl_range)

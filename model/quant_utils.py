@@ -184,3 +184,37 @@ def _calc_quant_scale(model: nn.Module, num_bits, pctl_range=100., debug=False):
       print(f'Scaling factor for layer input: {layer.input_scale}')
       # layer.output_scale = _get_layer_quant_factor(layer.output_activations, num_bits, preceding_layer_scales, pctl_range, debug=debug)
       # print(f'Scaling factor for layer output: {layer.output_scale}')
+
+def _update_stats(x: torch.Tensor, stats):
+    with torch.no_grad():
+        # TODO: keep channel-wise stats
+        max_val, _ = torch.max(x, dim=1)
+        min_val, _ = torch.min(x, dim=1)
+
+        if not stats:
+          stats = {
+              'total': 1,
+              'raw_min': torch.min(x).item(),
+              'raw_max': torch.max(x).item()
+            }
+        else:
+          stats['total'] += 1
+          if torch.min(x).item() < stats['raw_min']:
+            stats['raw_min'] = torch.min(x).item()
+          if torch.max(x).item() < stats['raw_max']:
+            stats['raw_max'] = torch.max(x).item()
+        
+        weighting = 2.0/(stats['total'] + 1)
+
+        # Calculate exponential moving average
+        if 'ema_min' in stats:
+          stats['ema_min'] = weighting*(min_val.mean().item()) + (1- weighting)*stats['ema_min']          
+        else:
+          stats['ema_min'] = weighting*(min_val.mean().item())
+
+        if 'ema_max' in stats:
+          stats['ema_max'] = weighting*(max_val.mean().item()) + (1- weighting)*stats['ema_max']
+        else: 
+          stats['ema_max'] = weighting*(max_val.mean().item())
+  
+    return stats

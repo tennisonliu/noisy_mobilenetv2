@@ -25,6 +25,7 @@ def main():
     lr_schedule = [150, 250]
     lr_decay = 0.1
     track_running_stats = False
+    model_savename = 'vanilla_net.pth'
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     print('==> Preparing data..')
@@ -63,7 +64,7 @@ def main():
         train(net, criterion, optimizer, epoch, trainloader, device, lr_decay, lr_schedule)
         if (res := test(net, criterion, testloader, device, 
                         save_best=True, epoch=epoch, best_results=[best_acc, best_epoch], 
-                        save_model_path='best_net.pth')) is not None: [best_acc, best_epoch] = res
+                        save_model_path=model_savename)) is not None: [best_acc, best_epoch] = res
 
     print('==> Training complete..')
     print('Best Accuracy: %.4f at epoch %d' % (best_acc, best_epoch))
