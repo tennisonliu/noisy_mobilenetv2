@@ -182,8 +182,34 @@ def _calc_quant_scale(model: nn.Module, num_bits, pctl_range=100., debug=False):
       layer.input_scale = _get_layer_quant_factor(layer.input_activations, num_bits, preceding_layer_scales, pctl_range, debug=debug)
       preceding_layer_scales.append((layer.weight.scale, layer.input_scale))
       print(f'Scaling factor for layer input: {layer.input_scale}')
-      # layer.output_scale = _get_layer_quant_factor(layer.output_activations, num_bits, preceding_layer_scales, pctl_range, debug=debug)
-      # print(f'Scaling factor for layer output: {layer.output_scale}')
+
+def _get_layer_min_max(activations, pctl_range=100.0):
+  '''
+  Calculate min and max activation value given percentile range
+  '''
+  sorted_activations = np.sort(activations)
+  print(f'size: {len(activations)} original max: {np.max(activations)}, original min: {np.min(activations)}')
+  # get max and min activations values given percentile
+  max_value = sorted_activations[math.floor((pctl_range+0.5*(100.0-pctl_range))/100.0*len(activations))-1]
+  min_value = sorted_activations[math.floor((0.5*(100.0-pctl_range))/100.0*len(activations))]
+  return min_value, max_value
+
+def _get_layer_stats(model: nn.Module, pctl_range=100.0):
+  '''
+  Helper function to get min and max activation values
+  '''
+  print(f'\n==> Calculating scaling factor with {pctl_range}% of activations')
+  layer_no = 0
+  for layer in model.modules():
+    if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
+      layer_no += 1
+      print(f'Layer: {layer_no}, {layer}')
+      if not np.any(layer.input_activations):
+        print(f'No input activations registered for layer {layer_no}')
+        pass
+      else:
+        layer.min_val, layer.max_val = _get_layer_min_max(layer.input_activations, pctl_range)
+        print(f'layer activations max: {layer.max_val}, min: {layer.min_val}')
 
 def _update_stats(x: torch.Tensor, stats):
     with torch.no_grad():

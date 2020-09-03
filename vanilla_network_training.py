@@ -24,8 +24,8 @@ def main():
     weight_decay = 4e-5
     lr_schedule = [150, 250]
     lr_decay = 0.1
-    track_running_stats = False
-    model_savename = 'vanilla_net.pth'
+    track_running_stats = True
+    model_savename = 'vanilla_net_bn_{}.pth'.format('on' if track_running_stats else 'off')
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     print('==> Preparing data..')

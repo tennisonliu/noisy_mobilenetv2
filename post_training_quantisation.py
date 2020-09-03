@@ -7,7 +7,7 @@ import torch.optim as optim
 import torch.backends.cudnn as cudnn
 import os
 from model import *
-from model.quant_utils import _quantise_layer_weights, _register_activation_profiling_hooks, _get_layer_quant_factor, _calc_quant_scale
+from model.quant_utils import _quantise_layer_weights, _register_activation_profiling_hooks, _get_layer_stats
 from misc_utils import copy_model, train, test, prepare_data
 import matplotlib.pyplot as plt
 from copy import deepcopy
@@ -24,7 +24,7 @@ def main(saved_model_path, quant_bits, pctl_range):
     args = {'q_a': 0, 
             'q_w': 0, 
             'quant_three_sig': False,
-            'track_running_stats': False,
+            'track_running_stats': True,
             'debug': False}
     net = QuantisedMobileNetV2(**args)
     net = net.to(device)
@@ -47,12 +47,30 @@ def main(saved_model_path, quant_bits, pctl_range):
     print('\n[Raw MobileNetv2] - Best Accuracy: {} at epoch {}'.format(best_acc, best_epoch))
 
     # Quantise layer weights and evaluate
+    # print('\nEvaluating MobileNet with {} bits quantised weights'.format(quant_bits))
+    # quant_net = copy_model(net)
+    # _quantise_layer_weights(quant_net, device=device, num_bits=quant_bits, debug=True)
+    # best_acc, best_epoch = test(quant_net, criterion, testloader, device, save_best=False)
+    # print('\n[Quantised Weights MobileNetv2] - Best Accuracy: {} at epoch {}'.format(best_acc, best_epoch))
+    
+    # Quantise layer weights and evaluate
     print('\nEvaluating MobileNet with {} bits quantised weights'.format(quant_bits))
-    quant_net = copy_model(net)
-    _quantise_layer_weights(quant_net, device=device, num_bits=quant_bits, debug=True)
+    args = {'q_a': 0, 
+            'q_w': quant_bits, 
+            'quant_three_sig': False,
+            'track_running_stats': True,
+            'debug': False}
+    quant_net = QuantisedMobileNetV2(**args)
+    quant_net = quant_net.to(device)
+    if device == 'cuda':
+        quant_net = torch.nn.DataParallel(quant_net)
+        cudnn.benchmark = True
+    print('\n==> Creating network with weight quantisation function') 
+    # Copy weights from net
+    quant_net.load_state_dict(net.state_dict())
     best_acc, best_epoch = test(quant_net, criterion, testloader, device, save_best=False)
     print('\n[Quantised Weights MobileNetv2] - Best Accuracy: {} at epoch {}'.format(best_acc, best_epoch))
-    
+
     # Quantise layer activations
     print('\nEvalating MobileNetV2 with {} bits quantised weights and activations'.format(quant_bits))
     # Profile output activations witht train data
@@ -62,14 +80,14 @@ def main(saved_model_path, quant_bits, pctl_range):
     test(quant_net, criterion, trainloader, device, save_best=False, max_batches=2)
     quant_net.profile_activations = False
     # Calculate quantisation scale factor based on activation profiles
-    _calc_quant_scale(quant_net, num_bits=quant_bits, pctl_range=pctl_range, debug=False)
+    _get_layer_stats(quant_net, pctl_range=pctl_range)
 
     # Create net with quantisation during forward steps. 
     # Note: no q_w since quantised weights have already been copied over
     args = {'q_a': quant_bits, 
-            'q_w': 0, 
+            'q_w': quant_bits, 
             'quant_three_sig': False,
-            'track_running_stats': False,
+            'track_running_stats': True,
             'debug': False}
     quant_net_2 = QuantisedMobileNetV2(**args)
     quant_net_2 = quant_net_2.to(device)
@@ -78,27 +96,24 @@ def main(saved_model_path, quant_bits, pctl_range):
         cudnn.benchmark = True
     print('\n==> Creating network with quantisation function')
 
-    # Copy quantised weights from quant_net
-    quant_net_2.load_state_dict(quant_net.state_dict())
+    # Copy weights from net
+    quant_net_2.load_state_dict(net.state_dict())
 
     # Copy activation scale factor from quant_net
     layer_count = 0
     for layer_init2, layer_init in zip(quant_net_2.modules(), quant_net.modules()):
-        if isinstance(layer_init2, nn.Conv2d):
+        if isinstance(layer_init2, nn.Conv2d) or isinstance(layer_init2, nn.Linear):
             layer_count += 1
             if layer_count != 2:
-                layer_init2.input_scale = deepcopy(layer_init.input_scale)
-        if isinstance(layer_init2, nn.Linear):
-            layer_count += 1
-            layer_init2.input_scale = deepcopy(layer_init.input_scale)
-            # layer_init2.output_scale = deepcopy(layer_init.output_scale)
+                layer_init2.min_val = deepcopy(layer_init.min_val)
+                layer_init2.max_val = deepcopy(layer_init.max_val)
     assert layer_count==54
     
     best_acc, best_epoch = test(quant_net_2, criterion, testloader, device, save_best=False)
     print('\n[Quantised Weights + Activations MobileNetv2] - Best Accuracy: {} at epoch {}'.format(best_acc, best_epoch))
     
 if __name__ == "__main__":
-    saved_model_path = './checkpoint/vanilla_net.pth'
     quant_bits = 4
     pctl_range = 99.7 # three sigma range
+    saved_model_path = './checkpoint/vanilla_net_bn_True.pth'
     main(saved_model_path, quant_bits, pctl_range)

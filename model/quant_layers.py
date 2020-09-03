@@ -40,20 +40,21 @@ class NoisyConv2d(nn.Conv2d):
                     self.stats = _update_stats(input.clone().view(input.shape[0], -1), self.stats)
                     min_val = self.stats['ema_min']
                     max_val = self.stats['ema_max']
-                    qinput = self.quantise_input(input, None, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)
-                elif hasattr(self, input_scale):
-                    '''post-training quantisation'''
-                    input_scale = self.input_scale
-                    qinput = self.quantise_input(input, input_scale, None, None, self.num_bits, self.quant_three_sig, False, self.debug)
+                    qinput = self.quantise_input(input, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)
                 else:
                     '''[QAT] use fixed max and min values'''
                     min_val = self.stats['ema_min']
                     max_val = self.stats['ema_max']
-                    qinput = self.quantise_input(input, None, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)
+                    qinput = self.quantise_input(input, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)
             else:
-                min_val = self.stats['ema_min']
-                max_val = self.stats['ema_max']
-                qinput = self.quantise_input(input, None, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)       
+                if hasattr(self, 'min_val') and hasattr(self, 'max_val'):
+                    '''[PTQ] min, max activations supplied post-training'''
+                    min_val = self.min_val
+                    max_val = self.max_val
+                else:
+                    min_val = self.stats['ema_min']
+                    max_val = self.stats['ema_max']
+                qinput = self.quantise_input(input, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)       
 
             # debugging
             if self.debug:
@@ -68,7 +69,7 @@ class NoisyConv2d(nn.Conv2d):
             qinput = input
 
         if self.num_bits_weight > 0:
-            weight = self.quantise_weights(self.weight, None, None, None, self.num_bits_weight, self.quant_three_sig, False, self.debug)
+            weight = self.quantise_weights(self.weight, None, None, self.num_bits_weight, self.quant_three_sig, False, self.debug)
             if self.debug:
               print('Debugging weights before and after quantisation')
               print(f'Weight shape: {self.weight.size()}')
@@ -113,20 +114,22 @@ class NoisyLinear(nn.Linear):
                     self.stats = _update_stats(input.clone().view(input.shape[0], -1), self.stats)
                     min_val = self.stats['ema_min']
                     max_val = self.stats['ema_max']
-                    qinput = self.quantise_input(input, None, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)
-                elif hasattr(self, input_scale):
-                    '''post-training quantisation'''
-                    input_scale = self.input_scale
-                    qinput = self.quantise_input(input, input_scale, None, None, self.num_bits, self.quant_three_sig, False, self.debug)
+                    qinput = self.quantise_input(input, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)
                 else:
                     '''[QAT] use fixed max and min values'''
                     min_val = self.stats['ema_min']
                     max_val = self.stats['ema_max']
-                    qinput = self.quantise_input(input, None, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)
+                    qinput = self.quantise_input(input, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)
             else:
-                min_val = self.stats['ema_min']
-                max_val = self.stats['ema_max']
-                qinput = self.quantise_input(input, None, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)      
+                if hasattr(self, 'min_val') and hasattr(self, 'max_val'):
+                    '''[PTQ] min, max activations supplied post-training'''
+                    min_val = self.min_val
+                    max_val = self.max_val
+                else:
+                    min_val = self.stats['ema_min']
+                    max_val = self.stats['ema_max']
+                qinput = self.quantise_input(input, min_val, max_val, self.num_bits, self.quant_three_sig, False, self.debug)
+
 
             if self.debug:
               print('Debugging activations before and after quantisation')
@@ -140,7 +143,7 @@ class NoisyLinear(nn.Linear):
             qinput = input
 
         if self.num_bits_weight > 0:
-            weight = self.quantise_weights(self.weight, None, None, None, self.num_bits_weight, self.quant_three_sig, False, self.debug)
+            weight = self.quantise_weights(self.weight, None, None, self.num_bits_weight, self.quant_three_sig, False, self.debug)
             if self.debug:
               print('Debugging weights before and after quantisation')
               print(f'Weight shape: {self.weight.size()}')
@@ -242,7 +245,7 @@ class UniformQuantise(InplaceFunction):
     """modified from https://github.com/eladhoffer/quantized.pytorch/blob/master/models/modules/quantize.py"""
 
     @staticmethod
-    def forward(ctx, input, scale_factor=None, min_value=None, max_value=None, num_bits=8, three_sig=False, inplace=False, debug=False):
+    def forward(ctx, input, min_value=None, max_value=None, num_bits=8, three_sig=False, inplace=False, debug=False):
         ctx.inplace = inplace
         ctx.num_bits = num_bits
         ctx.save_for_backward(input)
@@ -253,33 +256,24 @@ class UniformQuantise(InplaceFunction):
         else:
             output = input.clone()
 
-        if scale_factor:
-            '''Post Training Quantisation i.e. scale factor provided after profiling'''
-            qmin = - 2. ** (num_bits - 1)
-            qmax = 2. ** (num_bits - 1) - 1.
-            with torch.no_grad():
-                output = (scale_factor * output)
-                output.clamp_(qmin, qmax).round_()  # quantize
+        '''[QAT] FakeQuantOp'''
+        if not min_value and not max_value:
+            max_value = torch.max(input).item()
+            min_value = torch.min(input).item()
 
-        else:
-            '''[QAT] FakeQuantOp'''
-            if not min_value and not max_value:
-                max_value = torch.max(input).item()
-                min_value = torch.min(input).item()
+        ctx.min_value = min_value
+        ctx.max_value = max_value
 
-            ctx.min_value = min_value
-            ctx.max_value = max_value
+        qmin = 0
+        qmax = 2. ** num_bits -1
+        scale = (max_value - min_value) / (qmax - qmin)
+        scale = max(scale, 1e-6)  # TODO figure out how to set this robustly! causes nans
 
-            qmin = 0
-            qmax = 2. ** num_bits -1
-            scale = (max_value - min_value) / (qmax - qmin)
-            scale = max(scale, 1e-6)  # TODO figure out how to set this robustly! causes nans
-
-            with torch.no_grad():
-                output.add_(-min_value).div_(scale).add_(qmin)
-                output.clamp_(qmin, qmax).round_()
-                # TODO: figure out the purpose behind dequantisation?
-                output.add_(-qmin).mul_(scale).add_(min_value)  # dequantize
+        with torch.no_grad():
+            output.add_(-min_value).div_(scale).add_(qmin)
+            output.clamp_(qmin, qmax).round_()
+            # TODO: figure out the purpose behind dequantisation?
+            output.add_(-qmin).mul_(scale).add_(min_value)  # dequantize
 
         return output
 
@@ -291,4 +285,4 @@ class UniformQuantise(InplaceFunction):
         grad_output[input > ctx.max_value] = 0
         grad_output[input < ctx.min_value] = 0
         # grad_input = grad_output
-        return grad_output, None, None, None, None, None, None, None
+        return grad_output, None, None, None, None, None, None

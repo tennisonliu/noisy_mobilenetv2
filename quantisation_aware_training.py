@@ -64,9 +64,9 @@ def main(quant_bits, q_calculate_running, profile_activations, profile_epochs, m
 
     
 if __name__ == "__main__":
-    quant_bits = 8
+    quant_bits = 4
     q_calculate_running = True
     profile_activations = True
     profile_epochs = 5
-    model_savename = 'qat_net.pth'
+    model_savename = 'qat_net_{}bit.pth'.format(quant_bits)
     main(quant_bits, q_calculate_running, profile_activations, profile_epochs, model_savename)
